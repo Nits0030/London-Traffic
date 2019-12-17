@@ -1,0 +1,557 @@
+#####  Using Mongo DB connection to R studio ########
+
+require(RMongo)
+Loading required package: RMongo
+
+host <- "ec2-3-94-87-48.compute-1.amazonaws.com"
+username <- "abc"
+password <- "abc123"
+db <- "UKData"
+library(mongolite)
+con <- mongo(collection = "LondonData" , db = "UKData",url = "mongodb://3.94.87.48:27017")
+datarecord <-con$find()
+
+#####################################  DATA ANALYSIS ##########################################
+
+
+Introduction
+The file contains the Exploration of traffic accidents in UK at macro level, and City of London at micro lewvel. We explore wo the accidents are distributed along UK, and further inside the city of London using the map files which are available openly. Further, the analysis has focussed on revealing variables which have the most significant role in making accidents fatal, and consequently the target of focus during urban planning.
+
+setwd("D:/Nikki/Projects/london_final.csv")
+Preparations
+Load libraries
+Loading libraries for general data manipulation, and visualiation
+
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(leaflet)
+library(sp)
+library(RColorBrewer)
+library(KernSmooth)
+library(rgeos)
+library(rgdal)
+library(raster)
+library(gganimate)
+library(lattice)
+library(latticeExtra)
+library(grid)
+Setting options
+We set options to enhance readibility by making R not pick up the scienific notation for numbers.
+
+options(scipen = 10)
+Helper functions
+Custom functions for multiplot and heat maps are defined
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+heatMap <-function(data,shape=NULL,col="blue",main="Sample HeatMap"){
+  # Plots a Heat Map of a Polygons Data Frame.  This will 
+  # demonstrate density within a finite set of polygons
+  #
+  # Args:
+  #   data:   Spatial Points dataframe
+  #   shape:  Polygons Data Frame 
+  #
+  #
+  #   Notes:  This function requires the sp and RColorBrewer
+  #           Packages
+  #
+  #   Beskow: 03/28/11   
+  #
+  is.installed <- function(mypkg) is.element(mypkg, 
+                                             installed.packages()[,1])
+  if (is.installed(mypkg="sp")==FALSE)  {
+    stop("sp package is not installed")}
+  if (is.installed(mypkg="RColorBrewer")==FALSE)  {
+    stop("RColorBrewer package is not installed")}
+  if (!class(data)=="SpatialPointsDataFrame")  {
+    stop("data argument is not SpatialPointsDataFrame")}
+  require(sp)
+  require(RColorBrewer)
+  freq_table<-data.frame(tabulate(over(as(data,"SpatialPoints"),
+                                       as(shape,"SpatialPolygons")),nbins=length(shape)))
+  names(freq_table)<-"counts"
+  
+  shape1<-spChFIDs(shape,as.character(1:length(shape)))
+  row.names(as(shape1,"data.frame"))
+  spdf<-SpatialPolygonsDataFrame(shape1, freq_table, match.ID = TRUE)
+  
+  rw.colors<-colorRampPalette(c("white",col))
+
+  spplot(spdf,scales = list(draw = TRUE),
+         col.regions=rw.colors(max(freq_table)), main=main, xlab = "Longitude", ylab="Latitude")
+}
+Load Data
+acci_info <- fread('./data/Accident_Information.csv')
+veh_info <- fread('./data/Vehicle_Information.csv')
+
+acci_info$Date <- ymd(acci_info$Date)
+#range(acci_info$Date)
+
+#acci_info <- acci_info[acci_info$Date > as.Date('2013-12-31'),]
+acci_info <- acci_info[!is.na(acci_info$Longitude),]
+acci_info$InScotland <- NULL
+Joining the accident and vehicle info
+df <- merge(acci_info, veh_info, by = "Accident_Index")
+rm(veh_info)
+df <- unique(df)
+df$Journey_Purpose_of_Driver <- NULL
+df$Year.x <- NULL
+df$Year.y <- NULL
+df$Sex_of_Driver <- NULL
+df$Was_Vehicle_Left_Hand_Drive <- NULL
+df$Towing_and_Articulation <- NULL
+df$Vehicle_Reference <- NULL
+df$X1st_Point_of_Impact <- NULL
+df$Vehicle_Leaving_Carriageway <- NULL
+df$Skidding_and_Overturning <- NULL
+df$Propulsion_Code <- NULL
+df$Vehicle_Location.Restricted_Lane <- NULL
+df$Hit_Object_in_Carriageway <- NULL
+df$Hit_Object_off_Carriageway <- NULL
+df$`1st_Road_Class` <- NULL
+df$`2nd_Road_Class` <- NULL
+df$Junction_Location <- NULL
+df$Driver_Home_Area_Type <- NULL
+df$Driver_IMD_Decile <- NULL
+df$`1st_Road_Number` <- NULL
+df$`2nd_Road_Number` <- NULL
+df$`Local_Authority_(District)` <- NULL
+df$`Local_Authority_(Highway)` <- NULL
+df$Engine_Capacity_.CC. <- NULL
+df$Carriageway_Hazards <- NULL
+df$Vehicle_Type <- NULL
+df$`Pedestrian_Crossing-Human_Control` <- NULL
+df$`Pedestrian_Crossing-Physical_Facilities` <- NULL
+Basic cleaning and preprocessing of files
+df <- df[df$Urban_or_Rural_Area != "Unallocated",]
+df$hour <- substr(df$Time, 1, 2)
+df$accident <- 1
+acci_count <- df[,c(1,3,8,12)]
+acci_count <- unique(acci_count)
+#acci_count <- as.data.frame(acci_count)
+Data exploration over UK
+Plotting accident count over time
+acci_count %>%
+  group_by(Date) %>%
+  summarise(Total_accidents = n()) %>%
+  ggplot(aes(Date,Total_accidents)) +
+  geom_line() +
+  geom_smooth(method = "loess", color = "blue", span = 1/8) +
+  labs(y = "Total Accidents", x = "Date")
+ Over the years, there have been a general incerease in number of accidents. Howevever, there seems to be a season trend.
+
+## Looking at Time Series Decomposition of Accident Data
+
+acci_number <- acci_count %>%
+  group_by(Date) %>%
+  summarise(Total_accidents = n())
+ts_acci <- ts(acci_number$Total_accidents, frequency = 365)
+plot(decompose(ts_acci))
+
+## The time series decomposition clearly shows that there is a annual cyclical increase in accidents, and an upward trend in accidents over the year. While the cyclical component has been regular, the trend had flattened out between 2008 and 2014. It may be because of lowered business activity post 2008 crisis.
+
+## Intensity map for the accidents, on a sample(5000)
+smpl <- sample(nrow(df), 5000, replace = F)
+
+xx <- df[smpl,]
+
+leaflet(xx) %>%
+
+  addTiles() %>%
+
+  addProviderTiles("CartoDB.Positron") %>%
+  
+  addMarkers(~Longitude, ~Latitude,
+
+             popup = ~c(Weather_Conditions), label = ~c(Accident_Severity),
+
+           clusterOptions = markerClusterOptions())
++
+−
+Leaflet | © OpenStreetMap contributors, CC-BY-SA, © OpenStreetMap © CartoDB
+Checking between urban and rural(Urban being Blue, Rural being Red)
+pal <- colorFactor(c("red", "navy"), domain = c("Urban", "Rural"))
+
+leaflet(xx) %>%
+
+  addTiles() %>%
+  
+  addCircleMarkers(~Longitude, ~Latitude,
+    radius = 3,
+    color = ~pal(Urban_or_Rural_Area),
+    stroke = FALSE, fillOpacity = 0.2
+  )
++
+−
+Leaflet | © OpenStreetMap contributors, CC-BY-SA
+London shows the densest clustering of accidents. We will explore it on a deeper level.
+
+## Exploration on London Data
+## Preparation of shape files for London
+library(rgdal)
+lnd <- readOGR(dsn = "./data/data_from_creating_maps_in_R", layer = "london_sport")
+## OGR data source with driver: ESRI Shapefile 
+## Source: "D:\nikki040218\NonProjects\london_final\data\data_from_creating_maps_in_R", layer: "london_sport"
+## with 33 features
+## It has 4 fields
+## Integer64 fields read as strings:  Pop_2001
+proj4string(lnd) <- NA_character_
+proj4string(lnd) <- CRS("+init=epsg:27700") # assign a new CRS
+
+EPSG <- make_EPSG() # create data frame of available EPSG codes
+EPSG[grepl("WGS 84$", EPSG$note), ] # search for WGS 84 code
+##      code     note                                         prj4
+## 249  4326 # WGS 84          +proj=longlat +datum=WGS84 +no_defs
+## 5311 4978 # WGS 84 +proj=geocent +datum=WGS84 +units=m +no_defs
+lnd84 <- spTransform(lnd, CRS("+init=epsg:4326")) # reproject
+UK traffic data and subsetting it to get london traffic map
+uk_traffic <- fread('./data/ukTrafficAADF.csv')
+uk_traffic_convert <- uk_traffic
+coordinates(uk_traffic_convert) <- ~Lon+Lat
+
+proj4string(uk_traffic_convert) <- CRS("+proj=longlat +datum=WGS84")
+#plot(uk_traffic_convert)
+uk_traffic_convert84 <- spTransform(uk_traffic_convert, CRS("+init=epsg:4326"))
+l_traffic_84 <- uk_traffic_convert84[lnd84, ]
+l_traffic <- as.data.frame(l_traffic_84)
+Subsetting the UK accident data on get London coordinates
+df_london <- df
+coordinates(df_london) <- ~Longitude+Latitude
+proj4string(df_london) <- CRS("+proj=longlat +datum=WGS84")
+d_london_convert84 <- spTransform(df_london, CRS("+init=epsg:4326"))
+d_london_convert84 <- d_london_convert84[lnd84, ]
+d_london <- as.data.frame(d_london_convert84)
+
+rm(df_london)
+rm(acci_count)
+rm(acci_number)
+Adding Borough names in London accident Data
+#pols <- shapefile("D:/nikki040218/NonProjects/Creating-maps-in-R-master/data/london_sport.shp") 
+#e <- extract(lnd84, d_london[, c('Longitude', 'Latitude')]) 
+#(Prepated above file in advance as it takes long time to finish)
+
+#e <- read.csv("./acci_with_borough_names.csv")
+#d_london$name <- e$name
+#d_london_convert84@data$name <- e$name
+d_london <- fread("./d_london_with_b_names.csv")
+d_london_convert84@data$name <- d_london$name
+#write.csv(d_london, "D:/nikki040218/NonProjects/london_final/d_london_with_b_names.csv", row.names = F)
+Plot of London Borough with names
+par(mar = c(1, 1, 1, 1)) # Set the margin on all sides to 0
+colors=rainbow(length(lnd84$name))
+plot(lnd84,col=colors, bg = "#A6CAE0", xlab = "Longitude", ylab="Latitude" )
+text(coordinates(lnd84), labels = lnd84$name, cex = 0.6)
+
+
+Accidents over time in London
+d_london %>% 
+  dplyr::select(Accident_Index, Date, Longitude, Latitude) %>%
+  unique() %>% mutate(Date = ymd(Date)) %>%
+  group_by(Date) %>%
+  summarise(Total_accidents = n()) %>%
+  ggplot(aes(Date,Total_accidents)) +
+  geom_line() +
+  geom_smooth(method = "loess", color = "blue", span = 1/8) +
+  labs(y = "Total Accidents", x = "Date")
+
+
+The plot shows similar time series distribution as full UK data.
+
+Abosolute heatmap and clustering for London
+london_map_df <- fortify(lnd84, region = 'name')
+ggplot(d_london, aes(x=Longitude, y=Latitude)) + 
+    stat_density2d(aes(fill = ..level..), alpha=0.5, geom="polygon")+
+    #geom_point(colour="red")+
+    geom_path(data=london_map_df,aes(x=long, y=lat,group=group), colour="grey50", size=1)+
+    scale_fill_gradientn(colours=rev(brewer.pal(10,"Spectral")))
+
+
+London accidents heat map with repsect to Borough
+heatMap(d_london_convert84,lnd84,col="red",main="Traffic accident heat Map")
+
+
+Both maps tell us that the central London has the most accident cases, i.e. Westminister, Ealing, Lambetta and Barnet.
+
+Removing data which is not required
+rm(dd)
+## Warning in rm(dd): object 'dd' not found
+rm(uk_traffic)
+rm(uk_traffic_convert)
+rm(uk_traffic_convert84)
+General Data preprocessing
+#make_count <- as.data.frame(d_london %>% group_by(make) %>% tally())
+#make_remove <- make_count$make[make_count$n < 20]
+d_london$Date <- ymd(d_london$Date)
+d_london$Location_Northing_OSGR <- NULL
+d_london$Location_Easting_OSGR <- NULL
+d_london$Urban_or_Rural_Area <- NULL
+d_london$weekday <- weekdays(d_london$Date, abbreviate = T)
+d_london$year <- year(d_london$Date)
+d_london$month <- month(d_london$Date, label = T, abbr = T)
+d_london <- mutate(d_london, popup = paste('Severity:',Accident_Severity, ', Car:',make,', Weather:',Weather_Conditions, sep = " "))
+
+d_london$Fatal <- ifelse(d_london$Accident_Severity=="Fatal",1,0)
+d_london$Serious <- ifelse(d_london$Accident_Severity=="Serious",1,0)
+d_london$Slight <- ifelse(d_london$Accident_Severity=="Slight",1,0)
+Random Sample of 10000 accidents plotted for London
+smpl <- sample(nrow(d_london), 10000, replace = F)
+
+xx <- d_london[smpl,]
+
+leaflet(xx) %>%
+
+  addTiles() %>%
+
+  addProviderTiles("CartoDB.Positron") %>%
+
+  addMarkers(~Longitude, ~Latitude,
+
+             popup = ~Accident_Index, label = ~popup,
+
+             clusterOptions = markerClusterOptions())
++
+−
+Leaflet | © OpenStreetMap contributors, CC-BY-SA, © OpenStreetMap © CartoDB
+Fatal accidents over the Months for London over years
+p1 <- d_london %>% dplyr::select(Accident_Index,Accident_Severity,Date,month,year,Fatal,Serious,Slight)%>%
+  group_by(year,month) %>% summarise(Total=n(), Prop_Fatal_accident=sum(Fatal)/Total) %>%
+  ggplot(aes(month, Prop_Fatal_accident, group = factor(year),color = factor(year))) + 
+  geom_line() +
+  geom_point() + labs(x="Month", colour="Year", y = "Proportion of Severe accidents") +
+  theme(axis.title.y = element_text(size = 8), legend.key.size = unit(0.2, "cm")) 
+  #guides(fill=guide_legend(nrow=1, byrow=TRUE))
+
+p2 <- d_london %>% dplyr::select(Accident_Index,Accident_Severity,Date,month,year,Fatal,Serious,Slight)%>%
+  group_by(month) %>% summarise(Total=n(), Prop_Fatal_accident=sum(Fatal)/Total) %>% ungroup() %>%
+  ggplot(aes(month, Prop_Fatal_accident, group = 1)) +
+  geom_line()+
+  geom_point()+  
+  #geom_bar(stat = 'identity') +
+  labs(x="Month", y = "Proportion of Severe accidents") +
+  theme(axis.title.y = element_text(size = 8))
+
+layout <- matrix(c(1,1,1,1,2,2,2,2),2,4,byrow=TRUE)
+multiplot(p1, p2, layout=layout)
+ From the plot, winter seasons seem to be the most precarious for the drivers, resulting in most proportion of fatal accidents. Oct, which is the wettest month for London used to show a spike in proportion of fatal accidents during initial part of decade (2005-15). However, it is no more so. Overall, there is reduction in proportion of fatal accidents. Nevertheless, winter is still where urban planning can focus on. Further, we look at the conditions of roads which can be proxy of winter effects.
+
+Fatal accidents based on Road type, and Road surface conditions along the months
+p1 <- d_london %>% filter(Road_Type != "Unknown")  %>%
+  dplyr::select(Accident_Index,Accident_Severity,Date,month,Road_Type,Fatal,Serious,Slight)%>%
+  group_by(Road_Type,month) %>% summarise(Total=n(), Prop_Fatal_accident=sum(Fatal)/Total) %>%
+  ggplot(aes(month, Prop_Fatal_accident, group = factor(Road_Type),color = factor(Road_Type))) + 
+  geom_line() +
+  geom_point() + labs(x="Month", colour="Road_Type", y = "Proportion of Severe accidents") +
+  theme(axis.title.y = element_text(size = 8), legend.key.size = unit(0.2, "cm"))
+
+p2 <- d_london %>% filter(Road_Surface_Conditions != "Data missing or out of range")  %>%
+  dplyr::select(Accident_Index,Accident_Severity,Date,month,Road_Surface_Conditions,Fatal,Serious,Slight)%>%
+  group_by(Road_Surface_Conditions,month) %>% summarise(Total=n(), Prop_Fatal_accident=sum(Fatal)/Total) %>%
+  ggplot(aes(month, Prop_Fatal_accident, group = factor(Road_Surface_Conditions), 
+             color = factor(Road_Surface_Conditions))) + 
+  geom_line() +
+  geom_point() + labs(x="Month", colour="Road_Surface_Conditions", y = "Proportion of Severe accidents") +
+  theme(axis.title.y = element_text(size = 8), legend.key.size = unit(0.2, "cm"))
+
+layout <- matrix(c(1,1,2,2),2,2,byrow=TRUE)
+multiplot(p1, p2, layout=layout)
+
+
+Surprisingly, none of the accidents in Snow are fatal. However, during the wettest month of Oct, there is a spike in fatal accidents in Frost/Ice along Slip roads. These roads are used while merging in existing carriageway. However, if the road is slippery due to ice/frost, the control can be tricky, and consequently fatal due to high speeds. The design of these roads should be reviewed and modified to provide adequate grip to merging and existing traffic.
+
+Fatal accidents based on Road type, and Road surface conditions over various Speed limits
+p1 <- d_london %>% filter(Road_Type != "Unknown")  %>%
+  dplyr::select(Accident_Index,Accident_Severity,Date,month,Speed_limit,Road_Type,Fatal,Serious,Slight)%>%
+  group_by(Speed_limit, Road_Type) %>% summarise(Total=n(), Prop_Fatal_accident=sum(Fatal)/Total) %>%
+  ggplot(aes(Speed_limit, Prop_Fatal_accident, group = factor(Road_Type),color = factor(Road_Type))) + 
+  geom_line() +
+  geom_point() + labs(x="Speed_limit", colour="Road_Type", y = "Proportion of Severe accidents") +
+  theme(axis.title.y = element_text(size = 8))
+
+p2 <- d_london %>% filter(Road_Surface_Conditions != "Data missing or out of range")  %>%
+  dplyr::select(Accident_Index,Accident_Severity,Date,month,Speed_limit,Road_Surface_Conditions,Fatal)%>%
+  group_by(Speed_limit, Road_Surface_Conditions) %>% summarise(Total=n(), Prop_Fatal_accident=sum(Fatal)/Total) %>%
+  ggplot(aes(Speed_limit, Prop_Fatal_accident, group = factor(Road_Surface_Conditions),
+             color = factor(Road_Surface_Conditions))) + 
+  geom_line() +
+  geom_point() + labs(x="Speed_limit", colour="Road_Surface_Conditions", y = "Proportion of Severe accidents") +
+  theme(axis.title.y = element_text(size = 8))
+
+layout <- matrix(c(1,1,2,2),2,2,byrow=TRUE)
+multiplot(p1, p2, layout=layout)
+
+
+When the speed limit in One way street or Single carriageway is high(40+), the probability of fatal accidents increases. Either those roads should be converted to dual ways/widened or speed limit should be reduced.
+
+From second plot it can be inferred that drivers tend to drive slow in frost or snow even when speed limit is high. However, same amount of precausion is not taken in Wet/Damp conditions leading to spike in fatal accidents.
+
+Fatal accidents based on Road type, and Road surface conditions over weather conditions
+p1 <- d_london %>% filter(Road_Type != "Unknown")  %>%
+  dplyr::select(Accident_Index,Accident_Severity,Date,month,Road_Type,Weather_Conditions,Fatal)%>%
+  group_by(Weather_Conditions, Road_Type) %>% summarise(Total=n(), Prop_Fatal_accident=sum(Fatal)/Total) %>%
+  ggplot(aes(Weather_Conditions, Prop_Fatal_accident, group = factor(Road_Type),color = factor(Road_Type))) + 
+  geom_line() +
+  geom_point() + labs(x="Weather_Conditions", colour="Road_Type", y = "Proportion of Severe accidents") +
+  theme(axis.title.y = element_text(size = 8), axis.text.x = element_text(angle = 20, size = 7,hjust = 1))
+
+p2 <- d_london %>% filter(Road_Surface_Conditions != "Data missing or out of range")  %>%
+  dplyr::select(Accident_Index,Accident_Severity,Date,month,Weather_Conditions,Road_Surface_Conditions,Fatal)%>%
+  group_by(Weather_Conditions, Road_Surface_Conditions) %>% summarise(Total=n(),
+                                                                      Prop_Fatal_accident=sum(Fatal)/Total) %>%
+  ggplot(aes(Weather_Conditions, Prop_Fatal_accident, group = factor(Road_Surface_Conditions),
+             color = factor(Road_Surface_Conditions))) + 
+  geom_line() +
+  geom_point() + labs(x="Weather_Conditions", colour="Road_Surface_Conditions", y = "Proportion of Severe accidents") +
+  theme(axis.title.y = element_text(size = 8), axis.text.x = element_text(angle = 20, size = 7,  hjust = 1))
+
+layout <- matrix(c(1,1,1,1,2,2,2,2),4,2,byrow=TRUE)
+multiplot(p1, p2, layout=layout)
+
+
+While there is spike in fatality of accidents in dual carriageway during fog, on one way street, the spike is in Raining and high wind conditions. Again, frost is the biggest contributer to fatalities in Frost conditions, maybe due to reduction of already compromised friction on roads. On dry roads, fog is the most significant fatality enhancer, probably due to high speeds attained with low visbility. During fog weather, there should be strict application of reduced allowed speeds.
+
+Chi Square tests to confirm the relationships establied in prior plots
+Severity of accident vs Weather
+chisq.test(d_london$Accident_Severity, d_london$Weather_Conditions, simulate.p.value = TRUE)
+## 
+##  Pearson's Chi-squared test with simulated p-value (based on 2000
+##  replicates)
+## 
+## data:  d_london$Accident_Severity and d_london$Weather_Conditions
+## X-squared = 96.372, df = NA, p-value = 0.0004998
+Using Chi-square test, we realise that the weather conditions effect the severity of the accidents.
+
+Severity of accident vs Borough
+chisq.test(d_london$Accident_Severity, d_london$Road_Surface_Conditions, simulate.p.value = TRUE)
+## 
+##  Pearson's Chi-squared test with simulated p-value (based on 2000
+##  replicates)
+## 
+## data:  d_london$Accident_Severity and d_london$Road_Surface_Conditions
+## X-squared = 27.864, df = NA, p-value = 0.006497
+The p value is low enough to confirm that the effect of different boroughs is significant.
+
+Similar chi square tests can be carried out to confirm the relationships between other categorical variables and severity of the accident.
+
+Relative Accident severity across the Boroughs
+runningcounts.df <- as.data.frame(prop.table(table(d_london$Accident_Severity, d_london$name),1))
+names(runningcounts.df) <- c("Accident_severity", "Borough", "Freq")
+
+theme_nogrid <- function (base_size = 12, base_family = "") {
+  theme_bw(base_size = base_size, base_family = base_family) %+replace% 
+    theme(panel.grid = element_blank())
+  }
+
+ggplot(runningcounts.df, aes(Accident_severity, Borough)) +
+   geom_tile(aes(fill = Freq), colour = "black") +
+   scale_fill_gradient(low = "white", high = "steelblue")
+
+
+Certain boroughs have disproportionately high number of severe accidents.
+
+Random Forest to check the variable importance
+We run a random forest model to model the fatal accidents. This model will give us the most important variables deciding the fatality of accidents ### Data preparation
+
+d_london$Fatal <- ifelse(d_london$Accident_Severity=='Fatal',1,0)
+d_london$Serious <- ifelse(d_london$Accident_Severity=='Serious',1,0)
+
+d_london_df <- d_london %>% dplyr::select(Date, Day_of_Week, Junction_Control, Light_Conditions, Road_Surface_Conditions, Road_Type, Time, Weather_Conditions, name, Fatal)
+
+d_london_df$Date <- ymd(d_london_df$Date)
+d_london_df$Minutes <- hour(hm(d_london_df$Time))*60 + minute(hm(d_london_df$Time))
+d_london_df$year <- year(d_london_df$Date)
+d_london_df$Month <- month(d_london_df$Date, label = T)
+d_london_df$Day_of_month <- mday(d_london_df$Date)
+d_london_df$Date <- NULL
+d_london_df$Time <- NULL
+d_london_df$Fatal <- ifelse(d_london_df$Fatal==1, "Fatal", "Not_Fatal")
+
+d_london_df$Month <- as.character(d_london_df$Month)
+Loading libraries for Random forest and initializing
+library(caTools)
+library(party)
+library(MLmetrics)
+
+library(h2o)
+# Initializing h2o
+localH2O <- h2o.init(nthreads = -1)
+
+h2o.init()
+Defining categorical variables and converting data to appropriate form
+cat_variables <- c("Day_of_Week","Junction_Control","Light_Conditions","Road_Surface_Conditions", "Road_Type", "Weather_Conditions", "name","Fatal","year", "Month")
+
+for(i in cat_variables){
+  d_london_df[[i]] <- as.factor(d_london_df[[i]])
+}
+d_london_df <- d_london_df[,c(1:7,9:12,8)]
+train.h2o <- as.h2o(d_london_df)
+Columns for dependent and independent variable
+y.dep <- 12
+x.indep <- c(1:11)
+Running Model
+rforest.model <- h2o.randomForest(y=y.dep, x=x.indep, training_frame = train.h2o, ntrees = 300, 
+                                  mtries = -1, max_depth = 7, seed = 123)
+Checking variable importance
+# Variable Importance
+h2o.varimp(rforest.model)
+## Variable Importances: 
+##                   variable relative_importance scaled_importance
+## 1                     name         2633.494873          1.000000
+## 2                    Month         1491.496704          0.566356
+## 3                  Minutes         1452.565796          0.551573
+## 4                     year         1195.330688          0.453895
+## 5             Day_of_month          742.198120          0.281830
+## 6              Day_of_Week          727.548645          0.276267
+## 7         Light_Conditions          647.276978          0.245786
+## 8       Weather_Conditions          511.037415          0.194053
+## 9         Junction_Control          485.319489          0.184287
+## 10               Road_Type          377.954407          0.143518
+## 11 Road_Surface_Conditions          181.176224          0.068797
+##    percentage
+## 1    0.252120
+## 2    0.142790
+## 3    0.139063
+## 4    0.114436
+## 5    0.071055
+## 6    0.069653
+## 7    0.061968
+## 8    0.048925
+## 9    0.046463
+## 10   0.036184
+## 11   0.017345
+The borough varaible, time of the day, and the month of the year are the most important variable. However, the time of the day also reflects the light conditions and office hours indirectly. Similarly month of the year represents the seasons and consequently the weather, and road conditions indirectly.
